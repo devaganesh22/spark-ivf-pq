@@ -1,0 +1,46 @@
+# Compiled class files
+*.class
+*.log
+
+# sbt specific
+.cache
+.history
+.lib/
+dist/*
+target/
+lib_managed/
+src_managed/
+project/boot/
+project/plugins/project/
+.scala_dependencies
+
+# Spark
+spark-warehouse/
+derby.log
+metastore_db/
+
+# IDE specific
+.idea/
+*.iml
+.vscode/
+.bsp/
+.metals/
+
+# OS specific
+.DS_Store
+Thumbs.db
+
+# Data files
+*.parquet
+*.bin
+*.hdf5
+*.exe
+*.zip
+
+# Temporary or scratch files
+scratch/
+check_recall.py
+CheckRecall.scala
+
+# Python virtual environment
+.venv/
