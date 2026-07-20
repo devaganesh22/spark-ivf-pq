@@ -330,12 +330,16 @@ class SparkIVFPQModel(val codebook: IVFPQCodebook) {
       (qId, SearchResult(nId, exactDist))
     }
     
+    // Extract local variables to avoid capturing `this` in RDD closure (Task not serializable)
+    val localK = k
+    val localExcludeSelf = excludeSelf
+    
     val exactResultsRdd = exactDistances.groupByKey().map { case (qId, results) =>
       val sorted = results.toArray.sortBy(_.distance)
-      val finalTopK = if (excludeSelf) {
-        sorted.filterNot(_.id == qId).take(k)
+      val finalTopK = if (localExcludeSelf) {
+        sorted.filterNot(_.id == qId).take(localK)
       } else {
-        sorted.take(k)
+        sorted.take(localK)
       }
       (qId, finalTopK)
     }
