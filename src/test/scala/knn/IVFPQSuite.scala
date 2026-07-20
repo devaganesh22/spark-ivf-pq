@@ -5,6 +5,7 @@ import scala.util.Random
 
 class IVFPQSuite extends AnyFunSuite {
 
+
   // Helper: brute-force exact KNN for recall comparison
   private def bruteForceKNN(
       query: Array[Float],
@@ -24,7 +25,7 @@ class IVFPQSuite extends AnyFunSuite {
     val numSubspaces = 4
     val data = Array.fill(500)(Array.fill(dim)(rng.nextFloat()))
 
-    val codebook = IVFPQIndex.train(data, numCoarseCentroids = 8, numSubspaces = numSubspaces)
+    val codebook = LocalTraining.localTrain(data, numCoarseCentroids = 8, numSubspaces = numSubspaces)
 
     assert(codebook.dimension === dim)
     assert(codebook.numSubspaces === numSubspaces)
@@ -40,7 +41,7 @@ class IVFPQSuite extends AnyFunSuite {
     val dim = 16
     val numSubspaces = 4
     val data = Array.fill(500)(Array.fill(dim)(rng.nextFloat()))
-    val codebook = IVFPQIndex.train(data, numCoarseCentroids = 8, numSubspaces = numSubspaces)
+    val codebook = LocalTraining.localTrain(data, numCoarseCentroids = 8, numSubspaces = numSubspaces)
 
     val record = IVFPQIndex.encode(42L, data(0), codebook)
     assert(record.id === 42L)
@@ -53,7 +54,7 @@ class IVFPQSuite extends AnyFunSuite {
     val dim = 16
     val numSubspaces = 4
     val data = Array.fill(500)(Array.fill(dim)(rng.nextFloat()))
-    val codebook = IVFPQIndex.train(data, numCoarseCentroids = 8, numSubspaces = numSubspaces)
+    val codebook = LocalTraining.localTrain(data, numCoarseCentroids = 8, numSubspaces = numSubspaces)
 
     val database = data.zipWithIndex.map { case (vec, idx) =>
       IVFPQIndex.encode(idx.toLong, vec, codebook)
@@ -74,7 +75,7 @@ class IVFPQSuite extends AnyFunSuite {
     val numSubspaces = 4
     val n = 1000
     val data = Array.fill(n)(Array.fill(dim)(rng.nextFloat()))
-    val codebook = IVFPQIndex.train(data, numCoarseCentroids = 16, numSubspaces = numSubspaces)
+    val codebook = LocalTraining.localTrain(data, numCoarseCentroids = 16, numSubspaces = numSubspaces)
 
     val database = data.zipWithIndex.map { case (vec, idx) =>
       IVFPQIndex.encode(idx.toLong, vec, codebook)
@@ -104,7 +105,7 @@ class IVFPQSuite extends AnyFunSuite {
     val dim = 16
     val numSubspaces = 4
     val data = Array.fill(300)(Array.fill(dim)(rng.nextFloat()))
-    val codebook = IVFPQIndex.train(data, numCoarseCentroids = 8, numSubspaces = numSubspaces)
+    val codebook = LocalTraining.localTrain(data, numCoarseCentroids = 8, numSubspaces = numSubspaces)
 
     // Serialize
     val baos = new java.io.ByteArrayOutputStream()

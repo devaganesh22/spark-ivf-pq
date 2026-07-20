@@ -206,12 +206,14 @@ class SparkIVFPQ {
   private var maxIterations: Int = 30
   private var tolerance: Float = 1e-4f
   private var metricName: String = "euclidean"
+  private var idCol: String = "id"
 
   def setNumCoarseCentroids(value: Int): this.type = { numCoarseCentroids = value; this }
   def setNumSubspaces(value: Int): this.type = { numSubspaces = value; this }
   def setMaxIterations(value: Int): this.type = { maxIterations = value; this }
   def setTolerance(value: Float): this.type = { tolerance = value; this }
   def setMetricName(value: String): this.type = { metricName = value; this }
+  def setIdCol(value: String): this.type = { idCol = value; this }
 
   def fit(baseDf: DataFrame, vectorCol: String = "vector"): SparkIVFPQModel = {
     // Extract vectors from DataFrame
@@ -232,7 +234,7 @@ class SparkIVFPQ {
       metricName
     )
 
-    new SparkIVFPQModel(codebook)
+    new SparkIVFPQModel(codebook).setIdCol(idCol)
   }
 }
 
@@ -243,23 +245,29 @@ class SparkIVFPQModel(val codebook: IVFPQCodebook) {
   private var k: Int = 100
   private var kApprox: Option[Int] = None
   private var nprobe: Option[Int] = None
+  private var idCol: String = "id"
+  private var excludeSelf: Boolean = false
 
   def setK(value: Int): this.type = { k = value; this }
   def setKApprox(value: Int): this.type = { kApprox = Some(value); this }
   def setNprobe(value: Int): this.type = { nprobe = Some(value); this }
+  def setIdCol(value: String): this.type = { idCol = value; this }
+  def setExcludeSelf(value: Boolean): this.type = { excludeSelf = value; this }
 
   def transform(queryDf: DataFrame, baseDf: DataFrame, vectorCol: String = "vector"): DataFrame = {
     val spark = queryDf.sparkSession
     import spark.implicits._
 
-    // Assign 0-indexed Long IDs to base vectors for lookup
-    val baseRdd = baseDf.select(vectorCol).rdd.map { row =>
-      row.getSeq[Any](0).map {
+    // Read base vectors along with their IDs
+    val baseRdd = baseDf.select(idCol, vectorCol).rdd.map { row =>
+      val id = row.getAs[Number](0).longValue()
+      val vec = row.getSeq[Any](1).map {
         case d: Double => d.toFloat
         case f: Float => f
         case i: Int => i.toFloat
       }.toArray
-    }.zipWithIndex().map(_.swap).cache()
+      (id, vec)
+    }.cache()
 
     // Broadcast Codebook
     val broadcastCodebook = spark.sparkContext.broadcast(codebook)
@@ -278,13 +286,15 @@ class SparkIVFPQModel(val codebook: IVFPQCodebook) {
     println(s"Dynamic Inference Heuristics -> nprobe: $finalNprobe, kApprox: $finalKApprox")
 
     // Extract query vectors
-    val queryVectors = queryDf.select(vectorCol).rdd.map { row =>
-      row.getSeq[Any](0).map {
+    val queryVectors = queryDf.select(idCol, vectorCol).rdd.map { row =>
+      val id = row.getAs[Number](0).longValue()
+      val vec = row.getSeq[Any](1).map {
         case d: Double => d.toFloat
         case f: Float => f
         case i: Int => i.toFloat
       }.toArray
-    }.collect().zipWithIndex.map { case (vec, idx) => (idx.toLong, vec) }
+      (id, vec)
+    }.collect()
 
     val queryRdd = spark.sparkContext.parallelize(queryVectors, numSlices = spark.sparkContext.defaultParallelism)
 
@@ -311,18 +321,24 @@ class SparkIVFPQModel(val codebook: IVFPQCodebook) {
       (qId, SearchResult(nId, exactDist))
     }
     
-    val exactResultsRdd = exactDistances.groupByKey().mapValues { results =>
-      results.toArray.sortBy(_.distance).take(k)
+    val exactResultsRdd = exactDistances.groupByKey().map { case (qId, results) =>
+      val sorted = results.toArray.sortBy(_.distance)
+      val finalTopK = if (excludeSelf) {
+        sorted.filterNot(_.id == qId).take(k)
+      } else {
+        sorted.take(k)
+      }
+      (qId, finalTopK)
     }
 
-    // Format as DataFrame
-    val outputData = exactResultsRdd.collect().sortBy(_._1).map { case (qId, topK) =>
-      val neighborIds = topK.map(_.id.toInt).toSeq
-      val distances = topK.map(_.distance).toSeq
-      (qId.toInt, neighborIds, distances)
-    }.toSeq
+    // Format as DataFrame: exploded (one row per neighbor)
+    val outputData = exactResultsRdd.flatMap { case (qId, topK) =>
+      topK.map { res =>
+        (qId, res.id, res.distance)
+      }
+    }.collect().toSeq
 
-    outputData.toDF("query_id", "approx_neighbors", "distances")
+    outputData.toDF("query_id", "neighbor_id", "distance")
   }
 }
 
