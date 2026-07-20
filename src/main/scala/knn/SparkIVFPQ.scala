@@ -218,11 +218,14 @@ class SparkIVFPQ {
   def fit(baseDf: DataFrame, vectorCol: String = "vector"): SparkIVFPQModel = {
     // Extract vectors from DataFrame
     val rawVectorsRdd = baseDf.select(vectorCol).rdd.map { row =>
-      row.getSeq[Any](0).map {
-        case d: Double => d.toFloat
-        case f: Float => f
-        case i: Int => i.toFloat
-      }.toArray
+      row.get(0) match {
+        case v: org.apache.spark.ml.linalg.Vector => v.toArray.map(_.toFloat)
+        case s: Seq[_] => s.map {
+          case d: Double => d.toFloat
+          case f: Float => f
+          case i: Int => i.toFloat
+        }.toArray
+      }
     }
 
     val codebook = SparkIVFPQ.trainFromRDD(
@@ -261,11 +264,14 @@ class SparkIVFPQModel(val codebook: IVFPQCodebook) {
     // Read base vectors along with their IDs (preserving datatype)
     val baseRdd = baseDf.select(idCol, vectorCol).rdd.map { row =>
       val id = row.get(0)
-      val vec = row.getSeq[Any](1).map {
-        case d: Double => d.toFloat
-        case f: Float => f
-        case i: Int => i.toFloat
-      }.toArray
+      val vec = row.get(1) match {
+        case v: org.apache.spark.ml.linalg.Vector => v.toArray.map(_.toFloat)
+        case s: Seq[_] => s.map {
+          case d: Double => d.toFloat
+          case f: Float => f
+          case i: Int => i.toFloat
+        }.toArray
+      }
       (id, vec)
     }.cache()
 
@@ -288,11 +294,14 @@ class SparkIVFPQModel(val codebook: IVFPQCodebook) {
     // Extract query vectors (preserving datatype)
     val queryVectors = queryDf.select(idCol, vectorCol).rdd.map { row =>
       val id = row.get(0)
-      val vec = row.getSeq[Any](1).map {
-        case d: Double => d.toFloat
-        case f: Float => f
-        case i: Int => i.toFloat
-      }.toArray
+      val vec = row.get(1) match {
+        case v: org.apache.spark.ml.linalg.Vector => v.toArray.map(_.toFloat)
+        case s: Seq[_] => s.map {
+          case d: Double => d.toFloat
+          case f: Float => f
+          case i: Int => i.toFloat
+        }.toArray
+      }
       (id, vec)
     }.collect()
 
