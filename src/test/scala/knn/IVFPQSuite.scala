@@ -36,6 +36,7 @@ class IVFPQSuite extends AnyFunSuite {
     assert(codebook.pqCentroids.forall(_.forall(_.length === dim / numSubspaces)))
   }
 
+
   test("IVFPQIndex.encode: produces valid quantized record") {
     val rng = new Random(42)
     val dim = 16
@@ -44,7 +45,7 @@ class IVFPQSuite extends AnyFunSuite {
     val codebook = LocalTraining.localTrain(data, numCoarseCentroids = 8, numSubspaces = numSubspaces)
 
     val record = IVFPQIndex.encode(42L, data(0), codebook)
-    assert(record.id === 42L)
+    assert(record.id == 42L)
     assert(record.coarseCentroidId >= 0 && record.coarseCentroidId < 8)
     assert(record.codes.length === numSubspaces)
   }
@@ -79,7 +80,7 @@ class IVFPQSuite extends AnyFunSuite {
 
     val database = data.zipWithIndex.map { case (vec, idx) =>
       IVFPQIndex.encode(idx.toLong, vec, codebook)
-    }
+    }.toArray
 
     val databaseWithIds = data.zipWithIndex.map { case (vec, idx) => (idx.toLong, vec) }
 
@@ -91,7 +92,7 @@ class IVFPQSuite extends AnyFunSuite {
     for (q <- 0 until numQueries) {
       val query = data(rng.nextInt(n))
       val exactIds = bruteForceKNN(query, databaseWithIds, k).toSet
-      val approxIds = IVFPQIndex.search(query, k, nprobe = 4, codebook, database).map(_.id).toSet
+      val approxIds = IVFPQIndex.search(query, k, nprobe = 4, codebook, database).map(_.id.asInstanceOf[Long]).toSet
       val recall = exactIds.intersect(approxIds).size.toDouble / k
       totalRecall += recall
     }

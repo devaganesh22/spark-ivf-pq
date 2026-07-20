@@ -52,14 +52,14 @@ object IVFPQCodebook {
 
 // Represents a quantized vector in the index
 case class QuantizedRecord(
-    id: Long,
+    id: Any,
     coarseCentroidId: Int,
     codes: Array[Byte] // Size: M
 ) extends Serializable
 
 // Represents a nearest neighbor search result
 case class SearchResult(
-    id: Long,
+    id: Any,
     distance: Float
 ) extends Serializable
 
@@ -89,9 +89,9 @@ object IVFPQIndex {
 
 
 
-  // Encodes a raw vector into a quantized record
+  // Encodes a raw vector into a QuantizedRecord using the codebook
   def encode(
-      id: Long,
+      id: Any,
       vector: Array[Float],
       codebook: IVFPQCodebook
   ): QuantizedRecord = {

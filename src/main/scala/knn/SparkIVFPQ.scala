@@ -135,7 +135,7 @@ object SparkIVFPQ {
 
   // Encodes raw vectors in an RDD into QuantizedRecords in parallel
   def indexRDD(
-      rdd: RDD[(Long, Array[Float])],
+      rdd: RDD[(Any, Array[Float])],
       broadcastCodebook: Broadcast[IVFPQCodebook]
   ): RDD[QuantizedRecord] = {
     rdd.mapPartitions { iter =>
@@ -149,11 +149,11 @@ object SparkIVFPQ {
   // Executes a distributed batch search using Asymmetric Distance Computation
   def distributedSearch(
       databaseRDD: RDD[QuantizedRecord],
-      queries: Array[(Long, Array[Float])], // (queryId, queryVector)
+      queries: Array[(Any, Array[Float])], // (queryId, queryVector)
       k: Int,
       nprobe: Int,
       broadcastCodebook: Broadcast[IVFPQCodebook]
-  ): RDD[(Long, Array[SearchResult])] = {
+  ): RDD[(Any, Array[SearchResult])] = {
     val sc = databaseRDD.sparkContext
     val broadcastQueries = sc.broadcast(queries)
 
@@ -258,9 +258,9 @@ class SparkIVFPQModel(val codebook: IVFPQCodebook) {
     val spark = queryDf.sparkSession
     import spark.implicits._
 
-    // Read base vectors along with their IDs
+    // Read base vectors along with their IDs (preserving datatype)
     val baseRdd = baseDf.select(idCol, vectorCol).rdd.map { row =>
-      val id = row.getAs[Number](0).longValue()
+      val id = row.get(0)
       val vec = row.getSeq[Any](1).map {
         case d: Double => d.toFloat
         case f: Float => f
@@ -285,9 +285,9 @@ class SparkIVFPQModel(val codebook: IVFPQCodebook) {
     val finalKApprox = kApprox.getOrElse(math.max(k * 20, (dbSize * 0.01).toInt))
     println(s"Dynamic Inference Heuristics -> nprobe: $finalNprobe, kApprox: $finalKApprox")
 
-    // Extract query vectors
+    // Extract query vectors (preserving datatype)
     val queryVectors = queryDf.select(idCol, vectorCol).rdd.map { row =>
-      val id = row.getAs[Number](0).longValue()
+      val id = row.get(0)
       val vec = row.getSeq[Any](1).map {
         case d: Double => d.toFloat
         case f: Float => f
@@ -331,14 +331,22 @@ class SparkIVFPQModel(val codebook: IVFPQCodebook) {
       (qId, finalTopK)
     }
 
-    // Format as DataFrame: exploded (one row per neighbor)
-    val outputData = exactResultsRdd.flatMap { case (qId, topK) =>
-      topK.map { res =>
-        (qId, res.id, res.distance)
-      }
-    }.collect().toSeq
+    // Format as DataFrame: Arrays of neighbors and distances preserving the ID datatype
+    val idType = queryDf.schema(idCol).dataType
+    val outSchema = org.apache.spark.sql.types.StructType(Array(
+      org.apache.spark.sql.types.StructField(idCol, idType, nullable = true),
+      org.apache.spark.sql.types.StructField("approx_neighbors", org.apache.spark.sql.types.ArrayType(idType), nullable = true),
+      org.apache.spark.sql.types.StructField("distances", org.apache.spark.sql.types.ArrayType(org.apache.spark.sql.types.DoubleType), nullable = true)
+    ))
 
-    outputData.toDF("query_id", "neighbor_id", "distance")
+    import org.apache.spark.sql.Row
+    val rowRdd = exactResultsRdd.map { case (qId, topK) =>
+      val neighborIds = topK.map(_.id).toSeq
+      val distances = topK.map(_.distance.toDouble).toSeq
+      Row(qId, neighborIds, distances)
+    }
+
+    spark.createDataFrame(rowRdd, outSchema)
   }
 }
 
