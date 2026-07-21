@@ -282,9 +282,7 @@ class SparkIVFPQModel(val codebook: IVFPQCodebook) {
 
     // Calculate Dynamic Heuristics for Inference
     val finalNprobe = nprobe.getOrElse(math.max(16, math.min(64, math.sqrt(codebook.coarseCentroids.length.toDouble).toInt)))
-    // We cannot easily get dbSize without triggering a job, but we'll use a fast count
-    val dbSize = baseRdd.count()
-    val finalKApprox = kApprox.getOrElse(math.max(k * 20, (dbSize * 0.01).toInt))
+    val finalKApprox = kApprox.getOrElse(math.min(k * k, 256))
     println(s"Dynamic Inference Heuristics -> nprobe: $finalNprobe, kApprox: $finalKApprox")
 
     // Extract query vectors (preserving datatype)
