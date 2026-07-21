@@ -51,9 +51,11 @@ object SparkIVFPQ {
     require(dimension % numSubspaces == 0, s"Dimension $dimension must be divisible by subspaces $numSubspaces")
     val subspaceDim = dimension / numSubspaces
 
-    println("Step 1/3: Training Coarse Centroids with Spark MLlib...")
+    val finalNumCoarseCentroids = if (numCoarseCentroids > 0) numCoarseCentroids else math.max(1, math.min(4096, (totalCount / 3000).toInt))
+
+    println(s"Step 1/3: Training Coarse Centroids (K=$finalNumCoarseCentroids) with Spark MLlib...")
     val coarseKMeans = new org.apache.spark.ml.clustering.KMeans()
-      .setK(numCoarseCentroids)
+      .setK(finalNumCoarseCentroids)
       .setMaxIter(maxIterations)
       .setTol(tolerance)
       .setFeaturesCol("features")
@@ -73,11 +75,11 @@ object SparkIVFPQ {
       var nearestIdx = 0
       var minDist = Float.MaxValue
       var c = 0
-      while (c < numCoarseCentroids) {
+      while (c < finalNumCoarseCentroids) {
         val dist = Metric.Euclidean.distance(sample, localCoarse(c))
         if (dist < minDist) {
-          minDist = dist
-          nearestIdx = c
+           minDist = dist
+           nearestIdx = c
         }
         c += 1
       }
@@ -201,7 +203,7 @@ object SparkIVFPQ {
  * Fluent Builder API: Estimator for Training
  */
 class SparkIVFPQ {
-  private var numCoarseCentroids: Int = 4096
+  private var numCoarseCentroids: Int = -1 // -1 means auto-scale based on dataset size
   private var numSubspaces: Int = 16
   private var maxIterations: Int = 30
   private var tolerance: Float = 1e-4f
@@ -278,21 +280,15 @@ class SparkIVFPQModel(val codebook: IVFPQCodebook) {
     // Broadcast Codebook
     val broadcastCodebook = spark.sparkContext.broadcast(codebook)
 
-    // Stage 1: Encode Database
-    val databaseRDD = SparkIVFPQ.indexRDD(baseRdd, broadcastCodebook).cache()
-    
-    // Broadcast Encoded Database for Wide Net Search
-    val encodedDbArray = databaseRDD.collect()
-    val broadcastEncodedDb = spark.sparkContext.broadcast(encodedDbArray)
-    val dbSize = encodedDbArray.length
-
     // Calculate Dynamic Heuristics for Inference
     val finalNprobe = nprobe.getOrElse(math.max(1, codebook.coarseCentroids.length / 20))
+    // We cannot easily get dbSize without triggering a job, but we'll use a fast count
+    val dbSize = baseRdd.count()
     val finalKApprox = kApprox.getOrElse(math.max(k * 20, (dbSize * 0.01).toInt))
     println(s"Dynamic Inference Heuristics -> nprobe: $finalNprobe, kApprox: $finalKApprox")
 
     // Extract query vectors (preserving datatype)
-    val queryVectors = queryDf.select(idCol, vectorCol).rdd.map { row =>
+    val queryRdd = queryDf.select(idCol, vectorCol).rdd.map { row =>
       val id = row.get(0)
       val vec = row.get(1) match {
         case v: org.apache.spark.ml.linalg.Vector => v.toArray.map(_.toFloat)
@@ -303,30 +299,62 @@ class SparkIVFPQModel(val codebook: IVFPQCodebook) {
         }.toArray
       }
       (id, vec)
-    }.collect()
-
-    val queryRdd = spark.sparkContext.parallelize(queryVectors, numSlices = spark.sparkContext.defaultParallelism)
-
-    // Stage 1: Fast Approximate Search
-    val approxResultsRdd = queryRdd.map { case (qId, qVec) =>
-      val localDb = broadcastEncodedDb.value
-      val cb = broadcastCodebook.value
-      val approxTopK = IVFPQIndex.search(qVec, finalKApprox, finalNprobe, cb, localDb)
-      (qId, approxTopK)
     }
 
-    // Stage 2: Exact Shuffle Join Re-Ranking
-    val explodedApprox = approxResultsRdd.flatMap { case (qId, results) =>
+    // Stage 1: Fast Approximate Search via Pure-Spark IVF CoGroup
+    
+    // 1a. Map Queries to their nearest `nprobe` coarse centroids
+    val queryCentroidsRdd = queryRdd.flatMap { case (qId, qVec) =>
+      val cb = broadcastCodebook.value
+      val preparedQuery = if (cb.metricName.toLowerCase == "cosine") IVFPQIndex.normalize(qVec) else qVec
+      
+      val coarseDists = cb.coarseCentroids.zipWithIndex.map { case (cVec, cIdx) =>
+        (cIdx, cb.getMetricImpl.distance(preparedQuery, cVec))
+      }
+      val topCoarse = coarseDists.sortBy(_._2).take(finalNprobe).map(_._1)
+      topCoarse.map(cIdx => (cIdx, (qId, preparedQuery)))
+    }
+
+    // 1b. Encode database and key by coarseCentroidId
+    val databaseRDD = SparkIVFPQ.indexRDD(baseRdd, broadcastCodebook)
+    val dbCentroidsRdd = databaseRDD.map(record => (record.coarseCentroidId, record))
+
+    // 1c. CoGroup and search locally per cluster (Zero database broadcast)
+    val approxResultsRdd = queryCentroidsRdd.cogroup(dbCentroidsRdd).flatMap { case (cIdx, (queriesIter, recordsIter)) =>
+      val cb = broadcastCodebook.value
+      val records = recordsIter.toArray
+      
+      if (records.isEmpty) {
+        Iterator.empty
+      } else {
+        queriesIter.map { case (qId, preparedQuery) =>
+          val approxTopK = IVFPQIndex.searchInCluster(preparedQuery, cIdx, finalKApprox, cb, records)
+          (qId, approxTopK)
+        }
+      }
+    }
+
+    // 1d. Global Top-K Reduction across clusters for each query
+    val globalApproxTopK = approxResultsRdd.groupByKey().map { case (qId, resultsIter) =>
+      val allResults = resultsIter.flatten.toArray
+      val bestK = allResults.sortBy(_.distance).take(finalKApprox)
+      (qId, bestK)
+    }
+
+    // Stage 2: Exact Shuffle Join Re-Ranking (Zero query broadcast)
+    val explodedApprox = globalApproxTopK.flatMap { case (qId, results) =>
       results.map(res => (res.id, qId))
     }
     
-    val joinedRdd = explodedApprox.join(baseRdd)
-    val broadcastQueries = spark.sparkContext.broadcast(queryVectors.toMap)
+    // Join with database to fetch raw vectors: nId -> (qId, dbVec)
+    val approxWithDb = explodedApprox.join(baseRdd).map { case (nId, (qId, dbVec)) =>
+      (qId, (nId, dbVec))
+    }
     
-    val exactDistances = joinedRdd.map { case (nId, (qId, rawDbVec)) =>
-      val qVec = broadcastQueries.value(qId)
+    // Join with queries to fetch original query vectors: qId -> ((nId, dbVec), qVec)
+    val exactDistances = approxWithDb.join(queryRdd).map { case (qId, ((nId, dbVec), qVec)) =>
       val metric = broadcastCodebook.value.getMetricImpl
-      val exactDist = metric.distance(qVec, rawDbVec)
+      val exactDist = metric.distance(qVec, dbVec)
       (qId, SearchResult(nId, exactDist))
     }
     

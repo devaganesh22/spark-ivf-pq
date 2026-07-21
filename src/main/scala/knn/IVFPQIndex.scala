@@ -201,71 +201,94 @@ object IVFPQIndex {
 
     while (p < probeCount) {
       val coarseCentroidId = probes(p)
-      val coarseCentroid = codebook.coarseCentroids(coarseCentroidId)
       val records = buckets(coarseCentroidId)
-
       if (records.nonEmpty) {
-        // Compute query residual for this coarse cluster
-        val queryResidual = new Array[Float](dimension)
-        var f = 0
-        while (f < dimension) {
-          queryResidual(f) = preparedQuery(f) - coarseCentroid(f)
-          f += 1
-        }
-
-        // Build lookup table of size M x 256: query-to-PQ-centroids distances
-        val lookupTable = Array.ofDim[Float](numSubspaces, 256)
-        var m = 0
-        while (m < numSubspaces) {
-          val startDim = m * subspaceDim
-          System.arraycopy(queryResidual, startDim, querySubVec, 0, subspaceDim)
-
-          var kCent = 0
-          while (kCent < 256) {
-            val dist = Metric.Euclidean.distance(querySubVec, codebook.pqCentroids(m)(kCent))
-            // Store distance squared to speed up calculations (avoiding sqrt if possible, 
-            // but since Metric.distance returns actual distance, we compute distance squared for ADC search)
-            lookupTable(m)(kCent) = dist * dist
-            kCent += 1
-          }
-          m += 1
-        }
-
-        // Scan records in the bucket using lookup table (ADC)
-        var r = 0
-        val recCount = records.length
-        while (r < recCount) {
-          val rec = records(r)
-          var distSq = 0.0f
-          var sub = 0
-          while (sub < numSubspaces) {
-            val codeIdx = rec.codes(sub) & 0xFF
-            distSq += lookupTable(sub)(codeIdx)
-            sub += 1
-          }
-
-          // Map distance squared back to final search distance
-          val finalDistance = if (codebook.metricName.toLowerCase == "cosine") {
-            // For Cosine, we used normalized vectors. Cosine distance = 1 - cos(theta) = L2_dist_sq / 2.
-            distSq / 2.0f
-          } else {
-            math.sqrt(distSq).toFloat
-          }
-
-          val result = SearchResult(rec.id, finalDistance)
-
+        val clusterResults = searchInCluster(preparedQuery, coarseCentroidId, k, codebook, records.toArray)
+        var i = 0
+        while (i < clusterResults.length) {
+          val result = clusterResults(i)
           if (pq.size < k) {
             pq.enqueue(result)
-          } else if (finalDistance < pq.head.distance) {
+          } else if (result.distance < pq.head.distance) {
             pq.dequeue()
             pq.enqueue(result)
           }
-          r += 1
+          i += 1
         }
       }
       p += 1
     }
 
+    pq.dequeueAll.reverse.toArray
+  }
+
+  // Searches a specific coarse cluster directly, used by distributed IVF joins
+  def searchInCluster(
+      preparedQuery: Array[Float],
+      coarseCentroidId: Int,
+      k: Int,
+      codebook: IVFPQCodebook,
+      records: Array[QuantizedRecord]
+  ): Array[SearchResult] = {
+    val dimension = codebook.dimension
+    val numSubspaces = codebook.numSubspaces
+    val subspaceDim = dimension / numSubspaces
+    val coarseCentroid = codebook.coarseCentroids(coarseCentroidId)
+    val pq = mutable.PriorityQueue.empty[SearchResult](Ordering.by(_.distance))
+
+    // Compute query residual for this coarse cluster
+    val queryResidual = new Array[Float](dimension)
+    var f = 0
+    while (f < dimension) {
+      queryResidual(f) = preparedQuery(f) - coarseCentroid(f)
+      f += 1
+    }
+
+    // Build lookup table of size M x 256: query-to-PQ-centroids distances
+    val lookupTable = Array.ofDim[Float](numSubspaces, 256)
+    val querySubVec = new Array[Float](subspaceDim)
+    var m = 0
+    while (m < numSubspaces) {
+      val startDim = m * subspaceDim
+      System.arraycopy(queryResidual, startDim, querySubVec, 0, subspaceDim)
+
+      var kCent = 0
+      while (kCent < 256) {
+        val dist = Metric.Euclidean.distance(querySubVec, codebook.pqCentroids(m)(kCent))
+        lookupTable(m)(kCent) = dist * dist
+        kCent += 1
+      }
+      m += 1
+    }
+
+    // Scan records in the bucket using lookup table (ADC)
+    var r = 0
+    val recCount = records.length
+    while (r < recCount) {
+      val rec = records(r)
+      var distSq = 0.0f
+      var sub = 0
+      while (sub < numSubspaces) {
+        val codeIdx = rec.codes(sub) & 0xFF
+        distSq += lookupTable(sub)(codeIdx)
+        sub += 1
+      }
+
+      val finalDistance = if (codebook.metricName.toLowerCase == "cosine") {
+        distSq / 2.0f
+      } else {
+        math.sqrt(distSq).toFloat
+      }
+
+      if (pq.size < k) {
+        pq.enqueue(SearchResult(rec.id, finalDistance))
+      } else if (finalDistance < pq.head.distance) {
+        pq.dequeue()
+        pq.enqueue(SearchResult(rec.id, finalDistance))
+      }
+      r += 1
+    }
+    
     pq.dequeueAll.reverse.toArray
   }
 }
